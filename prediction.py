@@ -3,16 +3,39 @@ import numpy as np
 from sklearn.ensemble import RandomForestRegressor
 import plotly.graph_objects as go
 import xlwings as xw
+import time
+from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings("ignore")
 
 # === FUNCTION TO LOAD & CLEAN DATA ===
 def load_and_clean_data(sheet):
-    df = pd.DataFrame(sheet.range("A1").options(pd.DataFrame, header=1, index=False).value)  # Load data from Excel
-    df.columns = df.columns.str.strip().str.lower()
-    df['date-time'] = pd.to_datetime(df['date-time'])
-    df = df.sort_values('date-time').reset_index(drop=True)  # Sort data by date-time
-    return df
+    try:
+        # Attempt to read data from the specified range
+        data = sheet.used_range.options(pd.DataFrame, header=1, index=False).value
+        if data is None or data.empty:
+            raise ValueError("No data found in the specified range.")
+        
+        df = pd.DataFrame(data)  # Load data into a DataFrame
+        df.columns = df.columns.str.strip().str.lower()  # Clean column names
+        df['date-time'] = pd.to_datetime(df['date-time'])  # Convert date-time column
+        df = df.sort_values('date-time').reset_index(drop=True)  # Sort data by date-time
+        return df
+    except Exception as e:
+        print(f"Error reading data from Excel: {e}")
+        return None
+
+# === FUNCTION TO WAIT UNTIL NEXT QUARTER CHANGE ===
+def wait_until_next_quarter():
+    now = datetime.now()
+    next_quarter = (now.minute // 15 + 1) * 15 % 60
+    next_hour = now.hour + (now.minute // 15 + 1) // 4
+    if next_hour == 24:
+        next_hour = 0
+    next_time = now.replace(hour=next_hour, minute=next_quarter, second=0, microsecond=0)
+    if next_time < now:
+        next_time += timedelta(hours=1)
+    return next_time
 
 # === FUNCTION TO MAKE PREDICTIONS ===
 def make_predictions(df, features):
@@ -44,6 +67,7 @@ def make_predictions(df, features):
             pred_close = model_close.predict(test_X)[0]
             pred_high = model_high.predict(test_X)[0]
             pred_low = model_low.predict(test_X)[0]
+            print(last_row['date-time'], pred_close, pred_high, pred_low)
 
             predictions.append([last_row['date-time'], pred_close, pred_high, pred_low])
 
@@ -54,79 +78,103 @@ def make_predictions(df, features):
     return predictions
 
 # === MAIN LOOP ===
-file_path = "ESc1_15T.xlsx"  # Path to your Excel file
-wb = xw.Book(file_path)  # Open the Excel workbook
-sheet = wb.sheets[0]  # Select the first sheet
+file_path = "ESc1_15T_v2.xlsx"  # Path to your Excel file
+try:
+    wb = xw.Book(file_path)  # Open the Excel workbook
+    sheet = wb.sheets[0]  # Select the first sheet
+except Exception as e:
+    print(f"Error opening Excel file: {e}")
+    exit()
 
-# Load and clean data
-df = load_and_clean_data(sheet)
+# Main loop for predictions every 15 minutes after quarter change
+while True:
+    # Wait until the next quarter change
+    next_time = wait_until_next_quarter()
+    time_to_wait = (next_time - datetime.now()).total_seconds()
 
-# Create target variables
-df['target_close'] = df['close'].shift(-1)
-df['target_high'] = df['high'].shift(-1)
-df['target_low'] = df['low'].shift(-1)
+    # Countdown until the next prediction
+    while time_to_wait > 0:
+        current_time = datetime.now()
+        print(f"Current Time: {current_time.strftime('%Y-%m-%d %H:%M:%S')} | Time Remaining for Next Prediction: {int(time_to_wait)} seconds", end='\r')
+        time.sleep(1)  # Update every second
+        time_to_wait -= 1
 
-# Calculate log returns
-df['log_return_close'] = np.log(df['close'] / df['close'].shift(1))
-df['log_return_high'] = np.log(df['high'] / df['high'].shift(1))
-df['log_return_low'] = np.log(df['low'] / df['low'].shift(1))
+    # Load and clean data
+    df = load_and_clean_data(sheet)
+    if df is None:
+        print("Failed to load data. Exiting.")
+        exit()
 
-# Create lag features
-for lag in range(1, 6):
-    df[f'close_lag_{lag}'] = df['close'].shift(lag)
-    df[f'return_lag_{lag}'] = df['log_return_close'].shift(lag)
-    df[f'high_lag_{lag}'] = df['high'].shift(lag)
-    df[f'low_lag_{lag}'] = df['low'].shift(lag)
+    # Create target variables
+    df['target_close'] = df['close'].shift(-1)
+    df['target_high'] = df['high'].shift(-1)
+    df['target_low'] = df['low'].shift(-1)
 
-# Create rolling statistics
-for w in [5, 10, 20]:
-    df[f'rolling_close_mean_{w}'] = df['close'].rolling(window=w).mean()
-    df[f'rolling_close_std_{w}'] = df['close'].rolling(window=w).std()
-    df[f'rolling_high_mean_{w}'] = df['high'].rolling(window=w).mean()
-    df[f'rolling_high_std_{w}'] = df['high'].rolling(window=w).std()
-    df[f'rolling_low_mean_{w}'] = df['low'].rolling(window=w).mean()
-    df[f'rolling_low_std_{w}'] = df['low'].rolling(window=w).std()
+    # Calculate log returns
+    df['log_return_close'] = np.log(df['close'] / df['close'].shift(1))
+    df['log_return_high'] = np.log(df['high'] / df['high'].shift(1))
+    df['log_return_low'] = np.log(df['low'] / df['low'].shift(1))
 
-# Create EWMA
-for span in [5, 10, 20]:
-    df[f'ewma_close_{span}'] = df['close'].ewm(span=span).mean()
-    df[f'ewma_high_{span}'] = df['high'].ewm(span=span).mean()
-    df[f'ewma_low_{span}'] = df['low'].ewm(span=span).mean()
+    # Create lag features
+    for lag in range(1, 6):
+        df[f'close_lag_{lag}'] = df['close'].shift(lag)
+        df[f'return_lag_{lag}'] = df['log_return_close'].shift(lag)
+        df[f'high_lag_{lag}'] = df['high'].shift(lag)
+        df[f'low_lag_{lag}'] = df['low'].shift(lag)
 
-# Create time features
-df['hour'] = df['date-time'].dt.hour
-df['dayofweek'] = df['date-time'].dt.dayofweek
+    # Create rolling statistics
+    for w in [5, 10, 20]:
+        df[f'rolling_close_mean_{w}'] = df['close'].rolling(window=w).mean()
+        df[f'rolling_close_std_{w}'] = df['close'].rolling(window=w).std()
+        df[f'rolling_high_mean_{w}'] = df['high'].rolling(window=w).mean()
+        df[f'rolling_high_std_{w}'] = df['high'].rolling(window=w).std()
+        df[f'rolling_low_mean_{w}'] = df['low'].rolling(window=w).mean()
+        df[f'rolling_low_std_{w}'] = df['low'].rolling(window=w).std()
 
-# Clean data
-df = df.dropna()
+    # Create EWMA
+    for span in [5, 10, 20]:
+        df[f'ewma_close_{span}'] = df['close'].ewm(span=span).mean()
+        df[f'ewma_high_{span}'] = df['high'].ewm(span=span).mean()
+        df[f'ewma_low_{span}'] = df['low'].ewm(span=span).mean()
 
-# Define features for the model
-features = [f'close_lag_{lag}' for lag in range(1, 6)] + \
-           [f'return_lag_{lag}' for lag in range(1, 6)] + \
-           [f'high_lag_{lag}' for lag in range(1, 6)] + \
-           [f'low_lag_{lag}' for lag in range(1, 6)] + \
-           [f'rolling_close_mean_{w}' for w in [5, 10, 20]] + \
-           [f'rolling_high_mean_{w}' for w in [5, 10, 20]] + \
-           [f'rolling_low_mean_{w}' for w in [5, 10, 20]] + \
-           [f'ewma_close_{span}' for span in [5, 10, 20]] + \
-           [f'ewma_high_{span}' for span in [5, 10, 20]] + \
-           [f'ewma_low_{span}' for span in [5, 10, 20]] + \
-           ['hour', 'dayofweek']
+    # Create time features
+    df['hour'] = df['date-time'].dt.hour
+    df['dayofweek'] = df['date-time'].dt.dayofweek
 
-# Make predictions
-predictions = make_predictions(df, features)
+    # Clean data
+    df = df.dropna()
 
-# Convert predictions to DataFrame
-result_df = pd.DataFrame(predictions, columns=["time", "pred_close", "pred_high", "pred_low"])
+    # Define features for the model
+    features = [f'close_lag_{lag}' for lag in range(1, 6)] + \
+               [f'return_lag_{lag}' for lag in range(1, 6)] + \
+               [f'high_lag_{lag}' for lag in range(1, 6)] + \
+ [f'low_lag_{lag}' for lag in range(1, 6)] + \
+               [f'rolling_close_mean_{w}' for w in [5, 10, 20]] + \
+               [f'rolling_high_mean_{w}' for w in [5, 10, 20]] + \
+               [f'rolling_low_mean_{w}' for w in [5, 10, 20]] + \
+               [f'ewma_close_{span}' for span in [5, 10, 20]] + \
+               [f'ewma_high_{span}' for span in [5, 10, 20]] + \
+               [f'ewma_low_{span}' for span in [5, 10, 20]] + \
+               ['hour', 'dayofweek']
 
-# Print predictions
-print("Predictions for the next 5 candles:")
-print(result_df)
+    # Print the current time
+    current_time = datetime.now()
+    print(f"Current Time: {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
 
-# === PLOT PREDICTIONS ===
-fig = go.Figure()
-fig.add_trace(go.Scatter(x=result_df["time"], y=result_df["pred_close"], mode='lines', name='Predicted Close'))
-fig.add_trace(go.Scatter(x=result_df["time"], y=result_df["pred_high"], mode='lines', name='Predicted High'))
-fig.add_trace(go.Scatter(x=result_df["time"], y=result_df["pred_low"], mode='lines', name='Predicted Low'))
-fig.update_layout(title='Predicted Prices for Next 5 Candles', xaxis_title='Time', yaxis_title='Price', template='plotly_dark')
-fig.show()
+    # Make predictions
+    predictions = make_predictions(df, features)
+
+    # Convert predictions to DataFrame
+    result_df = pd.DataFrame(predictions, columns=["time", "pred_close", "pred_high", "pred_low"])
+
+    # Print predictions
+    print("Predictions for the next 5 candles:")
+    print(result_df)
+
+    # === PLOT PREDICTIONS ===
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=result_df["time"], y=result_df["pred_close"], mode='lines', name='Predicted Close'))
+    fig.add_trace(go.Scatter(x=result_df["time"], y=result_df["pred_high"], mode='lines', name='Predicted High'))
+    fig.add_trace(go.Scatter(x=result_df["time"], y=result_df["pred_low"], mode='lines', name='Predicted Low'))
+    fig.update_layout(title='Predicted Prices for Next 5 Candles', xaxis_title='Time', yaxis_title='Price', template='plotly_dark')
+    fig.show()
