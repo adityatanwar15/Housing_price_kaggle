@@ -2,12 +2,19 @@ import pandas as pd
 import numpy as np
 import seaborn as sns
 import matplotlib.pyplot as plt
+import plotly.graph_objects as go
+import plotly.express as px
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error, mean_absolute_percentage_error
 from datetime import datetime
+import os
 
 # === LOAD ===
-df = pd.read_excel("ESc1_new2.xlsx")
+file_path = 'ESc1_new2.xlsx'
+if not os.path.exists(file_path):
+    raise FileNotFoundError(f"File not found: {file_path}. Please check the path or upload the correct file.")
+
+df = pd.read_excel(file_path)
 df.columns = df.columns.str.strip().str.lower()
 df['date-time'] = pd.to_datetime(df['date-time'])
 df = df.sort_values('date-time').reset_index(drop=True)
@@ -106,29 +113,28 @@ result_df['abs_error_close'] = result_df['error_close'].abs()
 result_df['hour'] = result_df['time'].dt.hour
 result_df['day'] = result_df['time'].dt.day_name()
 
-# Error distribution
-plt.figure(figsize=(10, 6))
-sns.histplot(result_df['error_close'], bins=20, kde=True, color="skyblue")
-plt.title("Error Distribution (Actual - Predicted Close)")
-plt.xlabel("Prediction Error")
-plt.ylabel("Frequency")
-plt.grid(True)
-plt.tight_layout()
-plt.show()
+# Plotly: Actual vs Predicted Close Price
+fig = go.Figure()
+fig.add_trace(go.Scatter(x=result_df['time'], y=result_df['actual_close'], mode='lines+markers', name='Actual Close'))
+fig.add_trace(go.Scatter(x=result_df['time'], y=result_df['pred_close'], mode='lines+markers', name='Predicted Close'))
+fig.update_layout(title='Actual vs Predicted Close Price', xaxis_title='Time', yaxis_title='Price', template='plotly_dark')
+fig.show()
 
-# Feature importance
+# Error distribution with Plotly
+fig = px.histogram(result_df, x='error_close', nbins=20, title="Error Distribution (Actual - Predicted Close)", template='plotly_dark')
+fig.show()
+
+# Feature importance with Plotly
 feature_importance = pd.DataFrame({
     "Feature": features,
     "Importance": model_close.feature_importances_
 }).sort_values("Importance", ascending=False)
 
-plt.figure(figsize=(10, 8))
-sns.barplot(x="Importance", y="Feature", data=feature_importance.head(15))
-plt.title("Top 15 Feature Importances (Close Prediction)")
-plt.tight_layout()
-plt.show()
+fig = px.bar(feature_importance.head(15), x="Importance", y="Feature", orientation='h', title="Top 15 Feature Importances (Close Prediction)", template='plotly_dark')
+fig.update_layout(yaxis={'categoryorder':'total ascending'})
+fig.show()
 
-# Heatmap of MAE by hour and day
+# Heatmap of MAE by hour and day using seaborn
 pivot = result_df.pivot_table(index='day', columns='hour', values='abs_error_close', aggfunc='mean')
 plt.figure(figsize=(12, 6))
 sns.heatmap(pivot, annot=True, fmt=".2f", cmap='YlGnBu', linewidths=0.5)
