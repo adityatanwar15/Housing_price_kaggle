@@ -1,5 +1,7 @@
 import pandas as pd
 import numpy as np
+import seaborn as sns
+import matplotlib.pyplot as plt
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error, mean_absolute_percentage_error
 from datetime import datetime
@@ -97,3 +99,41 @@ def metrics(true, pred):
 print("CLOSE:", metrics(result_df['actual_close'], result_df['pred_close']))
 print("HIGH:", metrics(result_df['actual_high'], result_df['pred_high']))
 print("LOW:", metrics(result_df['actual_low'], result_df['pred_low']))
+
+# === VISUALIZATIONS ===
+result_df['error_close'] = result_df['pred_close'] - result_df['actual_close']
+result_df['abs_error_close'] = result_df['error_close'].abs()
+result_df['hour'] = result_df['time'].dt.hour
+result_df['day'] = result_df['time'].dt.day_name()
+
+# Error distribution
+plt.figure(figsize=(10, 6))
+sns.histplot(result_df['error_close'], bins=20, kde=True, color="skyblue")
+plt.title("Error Distribution (Actual - Predicted Close)")
+plt.xlabel("Prediction Error")
+plt.ylabel("Frequency")
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+# Feature importance
+feature_importance = pd.DataFrame({
+    "Feature": features,
+    "Importance": model_close.feature_importances_
+}).sort_values("Importance", ascending=False)
+
+plt.figure(figsize=(10, 8))
+sns.barplot(x="Importance", y="Feature", data=feature_importance.head(15))
+plt.title("Top 15 Feature Importances (Close Prediction)")
+plt.tight_layout()
+plt.show()
+
+# Heatmap of MAE by hour and day
+pivot = result_df.pivot_table(index='day', columns='hour', values='abs_error_close', aggfunc='mean')
+plt.figure(figsize=(12, 6))
+sns.heatmap(pivot, annot=True, fmt=".2f", cmap='YlGnBu', linewidths=0.5)
+plt.title("Heatmap of MAE (Close Price) by Day of Week and Hour")
+plt.xlabel("Hour of Day")
+plt.ylabel("Day of Week")
+plt.tight_layout()
+plt.show()
