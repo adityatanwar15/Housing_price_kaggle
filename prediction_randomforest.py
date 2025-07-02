@@ -1,37 +1,33 @@
-
 import pandas as pd
 import numpy as np
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import mean_absolute_error, mean_squared_error, mean_absolute_percentage_error
+import seaborn as sns
+import matplotlib.pyplot as plt
 import plotly.graph_objects as go
 import plotly.express as px
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_absolute_error, mean_squared_error, mean_absolute_percentage_error
 from datetime import datetime
+import os
 import warnings
 warnings.filterwarnings("ignore")
 
-# === LOAD & CLEAN ===
-df = pd.read_excel("ESc1_new2.xlsx")
-df.columns = df.columns.str.strip().str.lower()
 
+# === LOAD ===
+file_path = 'ESc1_2025.csv'
+if not os.path.exists(file_path):
+    raise FileNotFoundError(f"File not found: {file_path}. Please check the path or upload the correct file.")
+
+df = pd.read_csv(file_path)
+df.columns = df.columns.str.strip().str.lower()
 df['date-time'] = pd.to_datetime(df['date-time'])
 df = df.sort_values('date-time').reset_index(drop=True)
-
-df['close'] = df['close']
-df['high'] = df['high']
-df['low'] = df['low']
 
 # === TARGETS ===
 df['target_close'] = df['close'].shift(-1)
 df['target_high'] = df['high'].shift(-1)
 df['target_low'] = df['low'].shift(-1)
 
-# === LOG RETURNS ===
-df['log_return_close'] = np.log(df['close'] / df['close'].shift(1))
-df['log_return_high'] = np.log(df['high'] / df['high'].shift(1))
-df['log_return_low'] = np.log(df['low'] / df['low'].shift(1))
-
-# === LAG FEATURES ===
-
+# === FEATURE ENGINEERING ===
 for lag in range(1, 3):
     if lag==1:
         span=5
@@ -51,119 +47,121 @@ for lag in range(1, 3):
         df[f'rolling_low_mean_{span}'] = df['low'].rolling(window=span).mean()
         df[f'ewma_high_{span}'] = df['high'].ewm(span=span).mean()
     
-# === TIME FEATURES ===
+
+    # span = lag * 5
+    # df[f'ewma_close_{span}'] = df['close'].ewm(span=span).mean()
+    # df[f'ewma_high_{span}'] = df['high'].ewm(span=span).mean()
+    # df[f'ewma_low_{span}'] = df['low'].ewm(span=span).mean()
+    # df[f'rolling_high_mean_{span}'] = df['high'].rolling(window=span).mean()
+    # df[f'rolling_low_mean_{span}'] = df['low'].rolling(window=span).mean()
+
 df['hour'] = df['date-time'].dt.hour
 df['dayofweek'] = df['date-time'].dt.dayofweek
 
+# === VOLUME / ORDER BOOK FEATURES ===
+df['rel_vol_10'] = df['volume'] / (df['volume'].rolling(window=10).mean() + 1e-9)
+df['bid_momentum'] = df['bid size'] / (df['bid size'].rolling(window=10).mean() + 1e-9)
+df['ask_momentum'] = df['bid size'] / (df['bid size'].rolling(window=10).mean() + 1e-9)
+df['bidask_volume_ratio'] = (df['bid size'] - df['ask size'] ) / (df['volume'])
+df['vwap_diff'] = df['vwap'] - df['close']
 
-#df = df[(df['hour'] >= 8) & (df['hour'] <= 21)]
-
-# === CLEAN ===
-df = df.dropna()
+df = df.dropna().reset_index(drop=True)
 
 # === FEATURES ===
 features = [col for col in df.columns if (
-    col.startswith(('high_lag_', 'rolling', 'ewma')) or 
-    col in ['hour', 'volume', 'bid size',  'vwap'])]
+    col.startswith(('rolling', 'ewma', 'rel_vol', 'bidask_volume_ratio', 'bid_', 'ask_', 'vwap_diff')) or
+    col in ['hour', 'volume', 'vwap','dayofweek','close','high','low'])]
 
-# === ROLLING MODEL SETUP ===
+# === MODEL LOOP ===
 total_len = len(df)
-start_idx = int(total_len * 0.6)
-end_idx = int(total_len * 1)
+start_idx = int(total_len * 0.3)
+end_idx = total_len
 
-predictions, actuals = [], []
-m=0
-start_t=datetime.now()
-print(start_t)
+predictions, actuals, timestamps = [], [], []
 for i in range(start_idx, end_idx):
-    #print(i,)
+    if len(predictions) < 10000 and 10 <= df['hour'].iloc[i] < 24  :
+        
+        train_start = max(0, i - int(total_len * 0.3))
+        X_train = df.iloc[train_start:i][features]
+        X_test = df.iloc[i][features].values.reshape(1, -1)
+        print(len(predictions))
 
-    if m<25 :
-        if int(df['hour'].iloc[i])>=12 and int(df['hour'].iloc[i])<22:
-     #       print(i)
-            
-            train_start = max(0, i - int(total_len * 0.6))
-            train_X = df.iloc[train_start:i][features]
-            test_X = df.iloc[i][features].values.reshape(1, -1)
+        y_close = df.iloc[train_start:i]['target_close']
+        y_high = df.iloc[train_start:i]['target_high']
+        y_low = df.iloc[train_start:i]['target_low']
 
-            train_y_close = df.iloc[train_start:i]['target_close']
-            train_y_high = df.iloc[train_start:i]['target_high']
-            train_y_low = df.iloc[train_start:i]['target_low']
-            timestamp = df.iloc[i]['date-time']
-            print(i,timestamp)
+        model_close = RandomForestRegressor(n_estimators=100, max_depth=10, random_state=42)
+        model_high = RandomForestRegressor(n_estimators=100, max_depth=10, random_state=42)
+        model_low = RandomForestRegressor(n_estimators=100, max_depth=10, random_state=42)
 
-            # === MODELS ===
-            model_close = RandomForestRegressor(n_estimators=100, max_depth=10, random_state=42)
-            model_high = RandomForestRegressor(n_estimators=100, max_depth=10, random_state=42)
-            model_low = RandomForestRegressor(n_estimators=100, max_depth=10, random_state=42)
+        model_close.fit(X_train, y_close)
+        model_high.fit(X_train, y_high)
+        model_low.fit(X_train, y_low)
 
-            model_close.fit(train_X, train_y_close)
-            model_high.fit(train_X, train_y_high)
-            model_low.fit(train_X, train_y_low)
+        pred_close = model_close.predict(X_test)[0]
+        pred_high = model_high.predict(X_test)[0]
+        pred_low = model_low.predict(X_test)[0]
 
-            pred_close = model_close.predict(test_X)[0]
-            pred_high = model_high.predict(test_X)[0]
-            pred_low = model_low.predict(test_X)[0]
+        predictions.append([pred_close, pred_high, pred_low])
+        actuals.append([
+            df.iloc[i]['target_close'],
+            df.iloc[i]['target_high'],
+            df.iloc[i]['target_low']
+        ])
+        timestamps.append(df.iloc[i]['date-time'])
 
-            actual_close = df.iloc[i]['target_close']
-            actual_high = df.iloc[i]['target_high']
-            actual_low = df.iloc[i]['target_low']
-
-            predictions.append([timestamp, pred_close, pred_high, pred_low])
-            actuals.append([actual_close, actual_high, actual_low])
-            m+=1
-
-end_t=datetime.now()
-print(end_t-start_t)
-
-
-# === RESULTS ===
-result_df = pd.DataFrame(predictions, columns=["time", "pred_close", "pred_high", "pred_low"])
-result_df["actual_close"] = [a[0] for a in actuals]
-result_df["actual_high"] = [a[1] for a in actuals]
-result_df["actual_low"] = [a[2] for a in actuals]
+# === RESULT DF ===
+result_df = pd.DataFrame(predictions, columns=['pred_close', 'pred_high', 'pred_low'])
+result_df['actual_close'] = [x[0] for x in actuals]
+result_df['actual_high'] = [x[1] for x in actuals]
+result_df['actual_low'] = [x[2] for x in actuals]
+result_df['time'] = timestamps
 
 # === METRICS ===
 def metrics(true, pred):
     return {
         "MAE": mean_absolute_error(true, pred),
-        "MSE": mean_squared_error(true, pred),
         "RMSE": np.sqrt(mean_squared_error(true, pred)),
         "MAPE": mean_absolute_percentage_error(true, pred)
-        }
+    }
 
-print("CLOSE METRICS:", metrics(result_df["actual_close"], result_df["pred_close"]))
-print("HIGH METRICS:", metrics(result_df["actual_high"], result_df["pred_high"]))
-print("LOW METRICS:", metrics(result_df["actual_low"], result_df["pred_low"]))
+print("CLOSE:", metrics(result_df['actual_close'], result_df['pred_close']))
+print("HIGH:", metrics(result_df['actual_high'], result_df['pred_high']))
+print("LOW:", metrics(result_df['actual_low'], result_df['pred_low']))
 
-# === SAVE ===
-#result_df.to_csv("rolling_predictionnhan11ced.csv", index=False)
+# === VISUALIZATIONS ===
+result_df['error_close'] = result_df['pred_close'] - result_df['actual_close']
+result_df['abs_error_close'] = result_df['error_close'].abs()
+result_df['hour'] = result_df['time'].dt.hour
+result_df['day'] = result_df['time'].dt.day_name()
 
-# === PLOTLY VISUALS ===
-def plot_predictions(df, col_actual, col_predicted, title):
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df["time"], y=df[col_actual], mode='lines', name='Actual'))
-    fig.add_trace(go.Scatter(x=df["time"], y=df[col_predicted], mode='lines', name='Predicted'))
-    fig.update_layout(title=title, xaxis_title='Time', yaxis_title='Price', template='plotly_dark')
-    fig.show()
-
-plot_predictions(result_df, "actual_close", "pred_close", "Actual vs Predicted Close Price")
-plot_predictions(result_df, "actual_high", "pred_high", "Actual vs Predicted High Price")
-plot_predictions(result_df, "actual_low", "pred_low", "Actual vs Predicted Low Price")
-
-def plot_feature_importance(model, feature_names, title="Feature Importance"):
-    fi = pd.DataFrame({
-    "Feature": feature_names,
-    "Importance": model.feature_importances_
-    }).sort_values("Importance", ascending=False).head(20)
-
-    fig = px.bar(fi, x="Importance", y="Feature", orientation='h', title=title, template='plotly_dark')
-    fig.update_layout(yaxis={'categoryorder':'total ascending'})
-    fig.show()
-
-plot_feature_importance(model_close, features, "Feature Importance - Close Price Model")
-
-# === OPTIONAL: ERROR DISTRIBUTION ===
-result_df["error_close"] = result_df["actual_close"] - result_df["pred_close"]
-fig = px.histogram(result_df, x="error_close", nbins=50, title="Error Distribution: Close Prediction", template='plotly_dark')
+# Plotly: Actual vs Predicted Close Price
+fig = go.Figure()
+fig.add_trace(go.Scatter(x=result_df['time'], y=result_df['actual_close'], mode='lines+markers', name='Actual Close'))
+fig.add_trace(go.Scatter(x=result_df['time'], y=result_df['pred_close'], mode='lines+markers', name='Predicted Close'))
+fig.update_layout(title='Actual vs Predicted Close Price', xaxis_title='Time', yaxis_title='Price', template='plotly_dark')
 fig.show()
+
+# Error distribution with Plotly
+fig = px.histogram(result_df, x='error_close', nbins=20, title="Error Distribution (Actual - Predicted Close)", template='plotly_dark')
+fig.show()
+
+# Feature importance with Plotly
+feature_importance = pd.DataFrame({
+    "Feature": features,
+    "Importance": model_close.feature_importances_
+}).sort_values("Importance", ascending=False)
+
+fig = px.bar(feature_importance.head(15), x="Importance", y="Feature", orientation='h', title="Top 15 Feature Importances (Close Prediction)", template='plotly_dark')
+fig.update_layout(yaxis={'categoryorder':'total ascending'})
+fig.show()
+
+# Heatmap of MAE by hour and day using seaborn
+pivot = result_df.pivot_table(index='day', columns='hour', values='abs_error_close', aggfunc='mean')
+plt.figure(figsize=(12, 6))
+sns.heatmap(pivot, annot=True, fmt=".2f", cmap='YlGnBu', linewidths=0.5)
+plt.title("Heatmap of MAE (Close Price) by Day of Week and Hour")
+plt.xlabel("Hour of Day")
+plt.ylabel("Day of Week")
+plt.tight_layout()
+plt.show()
