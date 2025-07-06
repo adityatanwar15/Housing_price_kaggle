@@ -1,3 +1,5 @@
+# Let's execute the provided code and calculate the MAE for the given configuration (train window = 500)
+
 import pandas as pd
 import numpy as np
 from sklearn.linear_model import SGDRegressor
@@ -7,21 +9,20 @@ import warnings
 
 warnings.filterwarnings("ignore")
 
-# === Load Data ===
-file_path = '/mnt/data/ESc1_2025.csv'  # Update this if your file is elsewhere
+# Load Data
+file_path = '/mnt/data/ESc1_2025.csv'
 df = pd.read_csv(file_path)
 df.columns = df.columns.str.strip().str.lower()
 df['date-time'] = pd.to_datetime(df['date-time'])
 df = df.sort_values('date-time').reset_index(drop=True)
 
-# === Feature Engineering ===
+# Feature Engineering
 df['close_lag1'] = df['close'].shift(1)
 df['vwap_lag1'] = df['vwap'].shift(1)
 df['momentum_5'] = df['close'].pct_change(5)
 df['volatility_10'] = df['close'].rolling(10).std()
-df['target_close_diff_alt'] = df['close'].shift(-1) - df['close']  # Predict delta
+df['target_close_diff_alt'] = df['close'].shift(-1) - df['close']
 
-# Time-based and order flow features
 df['hour'] = df['date-time'].dt.hour
 df['dayofweek'] = df['date-time'].dt.dayofweek
 df['rel_vol_10'] = df['volume'] / (df['volume'].rolling(10).mean() + 1e-9)
@@ -34,10 +35,9 @@ df['hour_cos'] = np.cos(2 * np.pi * df['hour'] / 24)
 df['dow_sin'] = np.sin(2 * np.pi * df['dayofweek'] / 7)
 df['dow_cos'] = np.cos(2 * np.pi * df['dayofweek'] / 7)
 
-# Drop any resulting NA values
 df = df.dropna().reset_index(drop=True)
 
-# === Features & Targets ===
+# Feature Selection
 features = [
     'rel_vol_10', 'bid_momentum', 'ask_momentum', 'bidask_volume_ratio', 'vwap_diff',
     'hour_sin', 'hour_cos', 'dow_sin', 'dow_cos',
@@ -51,18 +51,17 @@ closes = df['close'].values
 timestamps = df['date-time']
 hours = df['hour'].values
 
-# === Scaling ===
+# Scaling
 X_scaler = StandardScaler()
 y_scaler = StandardScaler()
 X_scaled = X_scaler.fit_transform(X)
 y_scaled = y_scaler.fit_transform(y).flatten()
 
-# === Training Parameters ===
+# Training Setup
 train_window = 500
 retrain_interval = 100
 predictions, actuals, times = [], [], []
 
-# === Initial Training ===
 model = SGDRegressor(
     loss='huber',
     penalty='l2',
@@ -74,10 +73,9 @@ model = SGDRegressor(
 )
 model.fit(X_scaled[:train_window], y_scaled[:train_window])
 
-# === Rolling Prediction with Retraining ===
 for i in range(train_window, len(X_scaled) - 1):
     if hours[i] < 10:
-        continue  # Skip early morning data
+        continue
 
     if (i - train_window) % retrain_interval == 0:
         start = i - train_window
@@ -102,11 +100,13 @@ for i in range(train_window, len(X_scaled) - 1):
     actuals.append(actual_close)
     times.append(timestamps[i])
 
-# === Final Results and MAE ===
+# Final Results
 result_df = pd.DataFrame({
     'time': pd.to_datetime(times),
     'pred_close': predictions,
     'actual_close': actuals
 })
 mae_final = mean_absolute_error(result_df['actual_close'], result_df['pred_close'])
-print("Final MAE (Train Window = 500):", round(mae_final, 3))
+mae_final
+
+    
