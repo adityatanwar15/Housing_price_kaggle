@@ -1,170 +1,208 @@
+# === COMPLETE COLAB‐READY SCRIPT WITH ROLLING‐WINDOW & OPTUNA HYPERPARAMETER TUNING ===
+
 # === SETUP ===
-!pip install -q pandas numpy scikit-learn tensorflow matplotlib
+!pip install -q pandas numpy scikit-learn tensorflow matplotlib plotly optuna
 
 import pandas as pd
 import numpy as np
+import optuna
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import mean_squared_error
-from sklearn.cluster import KMeans
-import tensorflow.keras.backend as K
+from sklearn.metrics import mean_squared_error, mean_absolute_error
+import tensorflow as tf
 from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Input, LSTM, Dense, Dropout
-import matplotlib.pyplot as plt
+from tensorflow.keras.layers import (
+    Input, Conv1D, MaxPooling1D, Bidirectional,
+    LSTM, Dropout, Dense, Attention, GlobalAveragePooling1D
+)
 from google.colab import files
+import plotly.graph_objs as go
 
-# === UPLOAD FILE ===
-print("\n📁 Please upload your ESc1_2025.csv file")
+# === UPLOAD & READ DATA ===
+print("📁 Please upload your ESc1_2025.csv file")
 uploaded = files.upload()
-
-# === READ & SORT DATA ===
-df = pd.read_csv("ESc1_2025.csv")
+df = pd.read_csv(next(iter(uploaded)))
 df["date-time"] = pd.to_datetime(df["date-time"])
 df.sort_values("date-time", inplace=True)
-
-# === CREATE TARGET (log return + smoothing + clipping + z-score) ===
-df["log_return_t+5"] = np.log(df["close"].shift(-5) / df["close"])
-df["log_return_t+5_smooth"] = df["log_return_t+5"].rolling(window=3, center=True, min_periods=1).mean()
-
-# Clip outliers
-q_low = df["log_return_t+5_smooth"].quantile(0.01)
-q_high = df["log_return_t+5_smooth"].quantile(0.99)
-df["log_return_t+5_clipped"] = df["log_return_t+5_smooth"].clip(q_low, q_high)
-
-# Z-score normalization of target (global; consider moving inside loop if you'd like truly in-sample scaling)
-target_scaler = StandardScaler()
-df["log_return_t+5_final"] = target_scaler.fit_transform(df[["log_return_t+5_clipped"]])
-
-# === CREATE LAG FEATURES ===
-max_lag = 5
-lag_features = []
-for lag in range(1, max_lag + 1):
-    for col in ["close", "vwap", "volume"]:
-        lag_col = f"{col}_lag_{lag}"
-        df[lag_col] = df[col].shift(lag)
-        lag_features.append(lag_col)
-
-# === INITIALIZE RESIDUAL FEATURES ===
-df["residual"] = np.nan
-df["residual_lag_1"] = 0.0
-df["residual_avg_3"] = 0.0
-
-# === DROP ROWS WITH MISSING LAGS/TARGET ===
-required = lag_features + ["log_return_t+5_final"]
-df.dropna(subset=required, inplace=True)
 df.reset_index(drop=True, inplace=True)
 
-# === MODEL BUILDER ===
-def build_model(input_shape):
+# === TARGET CONSTRUCTION ===
+df["log_ret5"] = np.log(df["close"].shift(-5) / df["close"])
+df["log_ret5_smooth"] = df["log_ret5"].rolling(3, center=True, min_periods=1).mean()
+q_low, q_high = df["log_ret5_smooth"].quantile([0.01, 0.99])
+df["log_ret5_clip"] = df["log_ret5_smooth"].clip(q_low, q_high)
+scaler_t = StandardScaler().fit(df[["log_ret5_clip"]].dropna())
+df["target"] = scaler_t.transform(df[["log_ret5_clip"]])
+
+# === FEATURE ENGINEERING ===
+df["spread"]    = df["bid size"] - df["ask size"]
+df["imbalance"] = (df["bid size"] - df["ask size"]) / (df["bid size"] + df["ask size"])
+
+max_lag = 5
+feature_cols = []
+for lag in range(1, max_lag + 1):
+    for col in ["close", "vwap", "volume", "spread", "imbalance"]:
+        name = f"{col}_lag_{lag}"
+        df[name] = df[col].shift(lag)
+        feature_cols.append(name)
+
+df.dropna(subset=feature_cols + ["target"], inplace=True)
+df.reset_index(drop=True, inplace=True)
+
+# === ROLLING WINDOW SETTINGS ===
+train_window = 3000
+val_window   = 20
+seq_len      = 10
+
+# sequence builder
+def build_sequences(X, y, seq_len):
+    Xs, ys = [], []
+    for i in range(seq_len, len(X)):
+        Xs.append(X[i-seq_len:i])
+        ys.append(y[i])
+    return np.array(Xs, dtype=np.float32), np.array(ys, dtype=np.float32)
+
+# hypermodel builder using trial hyperparams
+def build_model_hp(trial, input_shape):
+    conv_filters   = trial.suggest_categorical("conv_filters", [32, 64])
+    lstm_units     = trial.suggest_categorical("lstm_units", [32, 64])
+    dropout_rate   = trial.suggest_float("dropout_rate", 0.1, 0.3, step=0.1)
+    learning_rate  = trial.suggest_categorical("learning_rate", [1e-4, 1e-3])
+    
     inp = Input(shape=input_shape)
-    x = LSTM(64, return_sequences=True)(inp)
-    x = LSTM(32)(x)
-    x = Dropout(0.2)(x)
-    x = Dense(16, activation='relu')(x)
+    x = Conv1D(conv_filters, 3, padding="same", activation="relu")(inp)
+    x = MaxPooling1D(2)(x)
+    x = Bidirectional(
+        LSTM(lstm_units, return_sequences=True, recurrent_dropout=dropout_rate)
+    )(x)
+    att = Attention()([x, x])
+    x   = GlobalAveragePooling1D()(att)
+    x   = Dropout(dropout_rate)(x)
+    x   = Dense(32, activation="relu")(x)
     out = Dense(1)(x)
-    model = Model(inputs=inp, outputs=out)
-    model.compile(optimizer='adam', loss='mse')
+    
+    model = Model(inp, out)
+    opt   = tf.keras.optimizers.Adam(learning_rate=learning_rate, clipnorm=1.0)
+    model.compile(optimizer=opt, loss="huber")
     return model
 
-# === ROLLING TRAINING & VALIDATION ===
-train_window    = 3000
-val_window      = 20
-sequence_length = 10
-noise_std       = 0.3
-target_col      = "log_return_t+5_final"
+# objective for Optuna
+def objective(trial):
+    tf.keras.backend.clear_session()
+    errors = []
+    # walk-forward by val_window
+    for start in range(train_window, len(df) - val_window, val_window):
+        train_df = df.iloc[start - train_window : start]
+        val_df   = df.iloc[start : start + val_window]
+        
+        # scale features on train
+        scaler = StandardScaler().fit(train_df[feature_cols])
+        X_tr_base = scaler.transform(train_df[feature_cols])
+        X_val_base= scaler.transform(val_df[feature_cols])
+        y_tr_base = train_df["target"].values
+        y_val_base= val_df["target"].values
+        
+        # build sequences
+        X_tr_seq, y_tr_seq = build_sequences(X_tr_base, y_tr_base, seq_len)
+        X_val_seq, y_val_seq= build_sequences(X_val_base, y_val_base, seq_len)
+        if len(X_val_seq) == 0:
+            continue
+        
+        # build & train model
+        model_hp = build_model_hp(trial, (seq_len, X_tr_seq.shape[2]))
+        model_hp.fit(X_tr_seq, y_tr_seq, epochs=5, batch_size=32, verbose=0)
+        
+        # predict and inverse-transform to log-return
+        y_pred_seq = model_hp.predict(X_val_seq, verbose=0).flatten()
+        y_pred_clip= scaler_t.inverse_transform(y_pred_seq.reshape(-1,1)).flatten()
+        y_true_clip= scaler_t.inverse_transform(y_val_seq.reshape(-1,1)).flatten()
+        
+        # RMSE for this window
+        rmse_win = mean_squared_error(y_true_clip, y_pred_clip, squared=False)
+        errors.append(rmse_win)
+    
+    return np.mean(errors)
 
-predictions = []
-actuals     = []
+# run hyperparameter tuning
+study = optuna.create_study(direction="minimize")
+study.optimize(objective, n_trials=20)
 
-for start_idx in range(train_window, len(df) - val_window):
-    # --- clear TF session to avoid memory bloat ---
-    K.clear_session()
+print("Best hyperparameters:", study.best_params)
+
+# === FINAL ROLLING PREDICTION WITH BEST HYPERPARAMS ===
+best = study.best_params
+def build_model_final(input_shape):
+    inp = Input(shape=input_shape)
+    x = Conv1D(best["conv_filters"], 3, padding="same", activation="relu")(inp)
+    x = MaxPooling1D(2)(x)
+    x = Bidirectional(
+        LSTM(best["lstm_units"], return_sequences=True, recurrent_dropout=best["dropout_rate"])
+    )(x)
+    att = Attention()([x, x])
+    x   = GlobalAveragePooling1D()(att)
+    x   = Dropout(best["dropout_rate"])(x)
+    x   = Dense(32, activation="relu")(x)
+    out = Dense(1)(x)
+    model = Model(inp, out)
+    opt   = tf.keras.optimizers.Adam(learning_rate=best["learning_rate"], clipnorm=1.0)
+    model.compile(optimizer=opt, loss="huber")
+    return model
+
+# perform rolling predictions on price
+pred_prices, true_prices = [], []
+for start in range(train_window, len(df) - val_window, val_window):
+    tf.keras.backend.clear_session()
+    train_df = df.iloc[start - train_window : start]
+    val_df   = df.iloc[start : start + val_window]
     
-    # --- prepare in-sample residuals ---
-    df["residual_for_cluster"] = df["residual"].fillna(0.0)
+    scaler = StandardScaler().fit(train_df[feature_cols])
+    X_tr_base = scaler.transform(train_df[feature_cols])
+    X_val_base= scaler.transform(val_df[feature_cols])
+    y_tr_base = train_df["target"].values
+    y_val_base= val_df["target"].values
     
-    # --- define base feature set ---
-    base_features = lag_features + ["residual_lag_1", "residual_avg_3"]
-    
-    # --- slice training window ---
-    train_df = df.iloc[start_idx - train_window : start_idx].copy()
-    
-    # --- fit scaler on training features only ---
-    scaler = StandardScaler().fit(train_df[base_features])
-    
-    # --- fit k-means on in-sample residuals ---
-    kmeans = KMeans(n_clusters=3, random_state=42).fit(
-        train_df[["residual_for_cluster"]]
-    )
-    
-    # --- build training sequences ---
-    X_train, y_train = [], []
-    for i in range(sequence_length, len(train_df)):
-        seq_df = train_df.iloc[i - sequence_length : i]
-        # scale base
-        seq_base = scaler.transform(seq_df[base_features])
-        # cluster per timestep
-        labels = kmeans.predict(seq_df[["residual_for_cluster"]])
-        clust_df = pd.get_dummies(labels, prefix="err_clust")
-        # ensure all 3 cluster cols exist
-        for c in [f"err_clust_{j}" for j in range(3)]:
-            if c not in clust_df:
-                clust_df[c] = 0
-        clust_arr = clust_df[[f"err_clust_{j}" for j in range(3)]].values
-        # combine
-        seq = np.hstack([seq_base, clust_arr])
-        X_train.append(seq)
-        # add noise for residual feedback
-        y_train.append(train_df[target_col].iloc[i] + np.random.normal(0, noise_std))
-    
-    X_train = np.array(X_train, dtype=np.float32)
-    y_train = np.array(y_train, dtype=np.float32)
-    
-    # --- build validation sequences (next 20 bars) ---
-    X_val, y_val = [], []
-    for idx in range(start_idx, start_idx + val_window):
-        seq_df = df.iloc[idx - sequence_length : idx]
-        seq_base = scaler.transform(seq_df[base_features])
-        labels   = kmeans.predict(seq_df[["residual_for_cluster"]])
-        clust_df = pd.get_dummies(labels, prefix="err_clust")
-        for c in [f"err_clust_{j}" for j in range(3)]:
-            if c not in clust_df:
-                clust_df[c] = 0
-        clust_arr = clust_df[[f"err_clust_{j}" for j in range(3)]].values
-        seq = np.hstack([seq_base, clust_arr])
-        X_val.append(seq)
-        y_val.append(df.loc[idx, target_col])
-    
-    X_val = np.array(X_val, dtype=np.float32)
-    y_val = np.array(y_val, dtype=np.float32)
-    
-    if X_train.size == 0 or X_val.size == 0:
+    X_tr_seq, y_tr_seq = build_sequences(X_tr_base, y_tr_base, seq_len)
+    X_val_seq, y_val_seq= build_sequences(X_val_base, y_val_base, seq_len)
+    if len(X_val_seq) == 0:
         continue
     
-    # --- train & predict ---
-    model = build_model((sequence_length, X_train.shape[2]))
-    model.fit(X_train, y_train, epochs=10, batch_size=32, verbose=0)
+    model_f = build_model_final((seq_len, X_tr_seq.shape[2]))
+    model_f.fit(X_tr_seq, y_tr_seq, epochs=20, batch_size=32, verbose=0)
     
-    y_pred = model.predict(X_val, verbose=0).flatten()
-    predictions.extend(y_pred.tolist())
-    actuals.extend(y_val.tolist())
+    y_pred_seq = model_f.predict(X_val_seq, verbose=0).flatten()
+    y_pred_clip= scaler_t.inverse_transform(y_pred_seq.reshape(-1,1)).flatten()
+    y_true_clip= scaler_t.inverse_transform(y_val_seq.reshape(-1,1)).flatten()
     
-    # --- update residual feedback features ---
-    for j, idx in enumerate(range(start_idx, start_idx + val_window)):
-        resid = y_val[j] - y_pred[j]
-        df.loc[idx, "residual"]       = resid
-        df.loc[idx, "residual_lag_1"] = df.loc[idx - 1, "residual"] if idx > 0 else 0.0
-        df.loc[idx, "residual_avg_3"] = df["residual"].iloc[max(idx - 3, 0) : idx].mean()
+    idxs = np.arange(start + seq_len, start + seq_len + len(y_pred_clip))
+    base_prices = df.loc[idxs, "close"].values
+    pred_price  = base_prices * np.exp(y_pred_clip)
+    true_price  = base_prices * np.exp(y_true_clip)
+    
+    pred_prices.extend(pred_price)
+    true_prices.extend(true_price)
 
-# === FINAL EVALUATION ===
-rmse = np.sqrt(mean_squared_error(actuals, predictions))
-print(f"\n✅ Final Rolling RMSE (on Z-scored target): {rmse:.4f}")
+# metrics on price
+mae_price = mean_absolute_error(true_prices, pred_prices)
+print(f"\n✅ Final Rolling MAE on Price: {mae_price:.4f}")
 
-# === PLOT RESULTS ===
-plt.figure(figsize=(14, 5))
-plt.plot(actuals,   label="Actual")
-plt.plot(predictions, label="Predicted")
-plt.title("Rolling Validation: 20-Bar Forecasts")
-plt.legend()
-plt.grid(True)
-plt.tight_layout()
-plt.show()
+# append & export
+df["pred_price"]  = np.nan
+df["actual_price"]= np.nan
+pred_start = train_window + seq_len
+indices = np.arange(pred_start, pred_start + len(pred_prices))
+df.loc[indices, "pred_price"]   = pred_prices
+df.loc[indices, "actual_price"] = true_prices
+
+output = "ESc1_2025_price_preds_optuna.csv"
+df.to_csv(output, index=False)
+files.download(output)
+
+# visualize
+fig = go.Figure()
+fig.add_trace(go.Scatter(y=true_prices, mode="lines", name="True Price"))
+fig.add_trace(go.Scatter(y=pred_prices, mode="lines", name="Predicted Price"))
+fig.update_layout(
+    title="Rolling Price Predictions with Optimized CNN-BiLSTM-Attn",
+    xaxis_title="Step",
+    yaxis_title="Price"
+)
+fig.show()
