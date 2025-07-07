@@ -1,7 +1,7 @@
+
 # === COMPLETE COLAB‐READY SCRIPT WITH RAW‐PARAM MDN HEAD & ROLLING VALIDATION ===
 
 # === SETUP ===
-!pip install -q pandas numpy scikit-learn tensorflow matplotlib plotly tensorflow-probability
 
 import pandas as pd
 import numpy as np
@@ -12,13 +12,16 @@ import tensorflow_probability as tfp
 from tensorflow.keras import backend as K, layers, Model
 from tensorflow.keras.callbacks import EarlyStopping
 import plotly.graph_objs as go
-from google.colab import files
+try:
+    from google.colab import files
+except Exception:  # not running in Colab
+    files = None
 
 tfd = tfp.distributions
 
 # === UPLOAD & READ DATA ===
 
-df = pd.read_csv("ESc1_2025.csv)
+df = pd.read_csv("ESc1_2025.csv")
 df["date-time"] = pd.to_datetime(df["date-time"])
 df.sort_values("date-time", inplace=True)
 df.reset_index(drop=True, inplace=True)
@@ -125,7 +128,7 @@ for start in range(train_window, len(df) - val_window):
 
     mixture = tfd.MixtureSameFamily(
         mixture_distribution=tfd.Categorical(logits=logits),
-        components_distribution=tfd.Normal(loc=means, scale=scales)
+        components_distribution=tfd.Normal(loc=means, scale=scales),
     )
     y_pred_norm = mixture.mean().numpy().flatten()
     y_true_norm = y_va_seq
@@ -157,10 +160,11 @@ df.loc[indices, "true_price_mdn"] = true_price_all
 out_path = "ESc1_2025_price_preds_mdn.csv"
 df.to_csv(out_path, index=False)
 print(f"Saved to {out_path}")
-try:
-    files.download(out_path)
-except:
-    pass
+if files is not None:
+    try:
+        files.download(out_path)
+    except Exception:
+        pass
 
 # === VISUALIZE ===
 fig = go.Figure()
