@@ -1,71 +1,104 @@
+# Colab-ready Lasso-VAR backtest conditioned on hour > 10
+
+# --- Install & import ---
+!pip install statsmodels scikit-learn --quiet
+
 import pandas as pd
 import numpy as np
 from sklearn.linear_model import MultiTaskLasso
+from sklearn.metrics import mean_squared_error, mean_absolute_error
 
-# Load data
-df = pd.read_csv('/mnt/data/ESc1_2025.csv', parse_dates=['date-time'])
-# Use correct column names with spaces
-data = df[['low','close','high','volume','bid size','ask size']].copy()
+# --- Upload / load data ---
+# from google.colab import files
+# uploaded = files.upload()  # uncomment to upload ESc1_2025.csv
 
-# Compute imbalance
-data['imbalance'] = (data['bid size'] - data['ask size']) / (data['bid size'] + data['ask size'])
+df = pd.read_csv('ESc1_2025.csv', parse_dates=['date-time'])
+data = df[['date-time','low','close','high','volume','bid size','ask size']].copy()
 
-# Prepare differenced data
+# --- Feature engineering ---
+data['imbalance'] = (
+    data['bid size'] - data['ask size']
+) / (
+    data['bid size'] + data['ask size']
+)
 diff_vars = ['low','close','high','volume']
 data_diff = data[diff_vars].diff().dropna()
-imbalance = data['imbalance'].iloc[data_diff.index]
+imbalance = data.loc[data_diff.index, 'imbalance']
 
-# Function to create lagged feature matrices
 def create_lag_matrix(df_diff, imbalance, p):
-    T = len(df_diff)
     X, Y = [], []
-    for t in range(p, T):
-        lag_vals = df_diff.values[t-p:t].flatten()
-        imb_val = imbalance.values[t-1]
-        X.append(np.concatenate([lag_vals, [imb_val]]))
+    for t in range(p, len(df_diff)):
+        X.append(np.concatenate([
+            df_diff.values[t-p:t].flatten(),
+            [imbalance.values[t-1]]
+        ]))
         Y.append(df_diff.values[t])
     return np.array(X), np.array(Y)
 
-p = 5  # lag order
+# --- Backtest conditional on hour > 10 ---
+n_preds = 7500
+p = 5
+alpha = 0.01
 
-# Baseline VAR backtest (OLS, no regularization)
-def backtest_baseline(n_days, p):
-    preds, trues = [], []
-    for i in range(1, n_days+1):
-        df_tr = data_diff.iloc[:-i]
-        imb_tr = imbalance.iloc[:-i]
-        X_tr, Y_tr = create_lag_matrix(df_tr, imb_tr, p)
-        coef, _, _, _ = np.linalg.lstsq(X_tr, Y_tr, rcond=None)
-        last_lags = np.concatenate([df_tr.values[-p:].flatten(), [imb_tr.iloc[-1]]])
-        y_pred_diff = last_lags.dot(coef)
-        pred_price = data['close'].iloc[-i-1] + y_pred_diff[1]
-        preds.append(pred_price)
-        trues.append(data['close'].iloc[-i])
-    return np.array(trues[::-1]), np.array(preds[::-1])
+trues_low, trues_close, trues_high = [], [], []
+preds_low, preds_close, preds_high = [], [], []
 
-# Lasso-penalized VAR backtest
-def backtest_lasso(n_days, p, alpha):
-    preds, trues = [], []
-    for i in range(1, n_days+1):
+i = 1
+while len(trues_close) < n_preds and i <= len(data_diff):
+    ts = data['date-time'].iloc[-i]
+    if ts.hour > 10:
+        print(i)
+        # train up to index -i
         df_tr = data_diff.iloc[:-i]
         imb_tr = imbalance.iloc[:-i]
         X_tr, Y_tr = create_lag_matrix(df_tr, imb_tr, p)
         model = MultiTaskLasso(alpha=alpha, max_iter=10000)
         model.fit(X_tr, Y_tr)
-        last_lags = np.concatenate([df_tr.values[-p:].flatten(), [imb_tr.iloc[-1]]])
-        y_pred_diff = model.predict(last_lags.reshape(1, -1))[0]
-        pred_price = data['close'].iloc[-i-1] + y_pred_diff[1]
-        preds.append(pred_price)
-        trues.append(data['close'].iloc[-i])
-    return np.array(trues[::-1]), np.array(preds[::-1])
+        last_block = np.concatenate([
+            df_tr.values[-p:].flatten(),
+            [imb_tr.iloc[-1]]
+        ])
+        pred_diff = model.predict(last_block.reshape(1,-1))[0]
 
-# Run backtests for the last 20 periods
-n_days = 20
-true_b, pred_b = backtest_baseline(n_days, p)
-true_l, pred_l = backtest_lasso(n_days, p, alpha=0.01)
+        base_idx = -i-1
+        # invert diffs
+        pred_l = data['low'].iloc[base_idx]   + pred_diff[0]
+        pred_c = data['close'].iloc[base_idx] + pred_diff[1]
+        pred_h = data['high'].iloc[base_idx]  + pred_diff[2]
 
-mae_b = np.mean(np.abs(true_b - pred_b))
-mae_l = np.mean(np.abs(true_l - pred_l))
+        true_l = data['low'].iloc[-i]
+        true_c = data['close'].iloc[-i]
+        true_h = data['high'].iloc[-i]
 
-print(f"{mae_b:.4f}")
-print(f"{mae_l:.4f}")
+        trues_low.append(true_l)
+        trues_close.append(true_c)
+        trues_high.append(true_h)
+        preds_low.append(pred_l)
+        preds_close.append(pred_c)
+        preds_high.append(pred_h)
+    i += 1
+
+# reverse for chronological order
+trues_low   = np.array(trues_low[::-1])
+trues_close = np.array(trues_close[::-1])
+trues_high  = np.array(trues_high[::-1])
+preds_low   = np.array(preds_low[::-1])
+preds_close = np.array(preds_close[::-1])
+preds_high  = np.array(preds_high[::-1])
+
+# --- Metrics for close ---
+mse_c = mean_squared_error(trues_close, preds_close)
+mae_c = mean_absolute_error(trues_close, preds_close)
+print(f"Lasso-VAR (hour > 10) over {len(trues_close)} predictions → MSE: {mse_c:.4f}, MAE: {mae_c:.4f}\n")
+
+# --- Results DataFrame ---
+results = pd.DataFrame({
+    'Actual Low':    trues_low,
+    'Pred Low':      preds_low,
+    'Actual Close':  trues_close,
+    'Pred Close':    preds_close,
+    'Actual High':   trues_high,
+    'Pred High':     preds_high,
+})
+print("Predictions (only when hour > 10):")
+print(results.to_string(index=False))
