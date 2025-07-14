@@ -1,4 +1,5 @@
 
+
 import pandas as pd
 import numpy as np
 from scipy.stats import linregress
@@ -21,7 +22,7 @@ except ImportError:
 import gc
 
 class IntegratedTradingSystem:
-    def __init__(self, training_window=1000, retrain_frequency=50, forecast_window=3000):
+    def __init__(self, training_window=4500, retrain_frequency=50, forecast_window=4500):
         """
         Integrated trading system with classification and price forecasting
 
@@ -215,8 +216,8 @@ class IntegratedTradingSystem:
         candles['pct_linear_slope'] = (candles['linear_slope_36'] - candles['linear_slope_72']) / candles['vol_rogers_satchell_10']
 
         # VWAP features
-        candles['vwap_short'] = (candles['close'] * candles['volume']).rolling(self.short_window, min_periods=1).sum() / candles['volume'].rolling(self.short_window, min_periods=1).sum()
-        candles['vwap_med'] = (candles['close'] * candles['volume']).rolling(self.med_window, min_periods=1).sum() / candles['volume'].rolling(self.med_window, min_periods=1).sum()
+        candles['vwap_short'] = (candles['vwap'] * candles['volume']).rolling(self.short_window, min_periods=1).sum() / candles['volume'].rolling(self.short_window, min_periods=1).sum()
+        candles['vwap_med'] = (candles['vwap'] * candles['volume']).rolling(self.med_window, min_periods=1).sum() / candles['volume'].rolling(self.med_window, min_periods=1).sum()
         candles['vwap_ratio_short'] = candles['close'] / candles['vwap_short']
         candles['vwap_distance_short'] = (candles['close'] - candles['vwap_short']) / candles['vwap_short']
 
@@ -378,6 +379,7 @@ class IntegratedTradingSystem:
         start_idx = min_candles_needed
 
         for i in range(start_idx, len(candles_with_predictions)):
+            
             # Get training data up to current point (excluding current candle to avoid lookahead)
             train_data = candles_with_predictions.iloc[:i].copy()
 
@@ -564,10 +566,71 @@ class IntegratedTradingSystem:
 if __name__ == "__main__":
     # Initialize integrated system
     trading_system = IntegratedTradingSystem(
-        training_window=500,     # Classification model window
+        training_window=4500,     # Classification model window
         retrain_frequency=25,    # Retrain every 25 candles
-        forecast_window=1000     # Price forecasting window
+        forecast_window=5000     # Price forecasting window
     )
+
+    MAX_FILES=None
+
+    FILE_PATTERN=r'C:\Users\aditya-tanwar\OneDrive - MMC\Documents\my_work\study_work\data\\'
+    # Find parquet files
+    parquet_files = os.listdir(FILE_PATTERN)
+    if not parquet_files:
+        print(f"❌ No files found matching pattern: {FILE_PATTERN}")
+        print("Please check your file pattern or current directory")
+        exit()
+
+    parquet_files.sort()
+    if MAX_FILES:
+        parquet_files = parquet_files[:MAX_FILES]
+
+    print(f"Found {len(parquet_files)} parquet files")
+
+    # Load and combine data
+    all_data = []
+    total_rows = 0
+
+    for  file_path in parquet_files:
+        try:
+            print(f"  Loading {file_path}... ", end="")
+            df = pd.read_parquet(FILE_PATTERN+file_path)
+            
+            # Filter for trades and clean
+            df = df[df['Type'] == 'Trade'].copy()
+            df = df.dropna(subset=['Price', 'Volume'])
+            
+            if len(df) > 0:
+                all_data.append(df[['Date-Time', 'Price', 'Volume']])
+                total_rows += len(df)
+                print(f"{len(df):,} trades")
+            else:
+                print("no valid trades")
+                
+        except Exception as e:
+            print(f"❌ Error loading {file_path}: {e}")
+            continue
+
+    if not all_data:
+        print("❌ No valid data found in any files")
+        exit()
+
+    # Combine all data
+    print(f"\\nCombining data from {len(all_data)} files...")
+    df = pd.concat(all_data, ignore_index=True)
+    df['Date-Time'] = pd.to_datetime(df['Date-Time'])
+    df = df.sort_values('Date-Time')
+
+    print(f"Total records: {len(df):,}")
+    print(f"Date range: {df['Date-Time'].min()} to {df['Date-Time'].max()}")
+    #trade_data = df[df['Type'] == 'Trade'].dropna(subset=['Price', 'Volume'])
+    candles = trading_system.process_tick_data_to_candles(df)
+    candles = trading_system.add_all_features(candles)
+    candles_with_predictions = trading_system.predict_all_candles(candles)
+
+
+
+
 
     # Example: Load your data
     # df = pd.read_parquet('your_data.parquet')
