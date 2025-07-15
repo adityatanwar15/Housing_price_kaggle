@@ -43,9 +43,52 @@ class IntegratedTradingSystem:
     def load_and_process_data(self, file_path):
         """Load parquet file and create 15-minute candles with proper volume/tick accumulation"""
         print(f"📊 Loading data from {file_path}...")
-        raw = pd.read_parquet(file_path)
-        trade = raw[(raw['Type']=='Trade') & raw['Price'].notna() & raw['Volume'].notna()].copy()
-        print(f"   ✅ Loaded {len(trade):,} trade records")
+        FILE_PATTERN=r'C:\Users\aditya-tanwar\OneDrive - MMC\Documents\my_work\study_work\data\\'
+        MAX_FILES=None
+        #Find parquet files
+        parquet_files = os.listdir(FILE_PATTERN)
+        if not parquet_files:
+            print(f"❌ No files found matching pattern: {FILE_PATTERN}")
+            print("Please check your file pattern or current directory")
+            exit()
+
+        parquet_files.sort()
+        if MAX_FILES:
+            parquet_files = parquet_files[:MAX_FILES]
+
+        print(f"Found {len(parquet_files)} parquet files")
+
+        # Load and combine data
+        all_data = []
+        total_rows = 0
+
+        for  file_path in parquet_files:
+            try:
+                print(f"  Loading {file_path}... ", end="")
+                df = pd.read_parquet(FILE_PATTERN+file_path)
+                
+                # Filter for trades and clean
+                df = df[df['Type'] == 'Trade'].copy()
+                df = df.dropna(subset=['Price', 'Volume'])
+                
+                if len(df) > 0:
+                    all_data.append(df[['Date-Time', 'Price', 'Volume']])
+                    total_rows += len(df)
+                    print(f"{len(df):,} trades")
+                else:
+                    print("no valid trades")
+                    
+            except Exception as e:
+                print(f"❌ Error loading {file_path}: {e}")
+                continue
+
+        if not all_data:
+            print("❌ No valid data found in any files")
+            exit()
+
+        # Combine all data
+        print(f"\\nCombining data from {len(all_data)} files...")
+        trade = pd.concat(all_data, ignore_index=True)
 
         trade['Date-Time'] = pd.to_datetime(trade['Date-Time'])
         trade['candle_time'] = trade['Date-Time'].dt.floor('15min')
@@ -409,9 +452,11 @@ class IntegratedTradingSystem:
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
         # Save to Excel with multiple sheets
-        excel_file = f'{filename_prefix}_{timestamp}.xlsx'
+        excel_file = f'{filename_prefix}_str{timestamp}.xlsx'
         with pd.ExcelWriter(excel_file, engine='openpyxl') as writer:
             # Main results
+            df['timestamp'] = df['timestamp'].astype(str)
+            candles['candle_time']=candles['candle_time'].astype('str')
             df.round(2).to_excel(writer, sheet_name='Predictions', index=False)
 
             # Performance summary
@@ -525,12 +570,14 @@ def run_trading_system(file_path, training_window=50, start_hour=None, start_ind
 # =============================================================================
 
 if __name__ == "__main__":
+    FILE_PATTERN=r'C:\Users\aditya-tanwar\OneDrive - MMC\Documents\my_work\study_work\data\\'
+        
     # Example usage with comprehensive features
     system, excel, csv = run_trading_system(
-        file_path='chunk_0032.parquet',
-        training_window=50,
-        start_hour=None,  # Auto start
-        num_predictions=10
+        file_path=FILE_PATTERN,
+        training_window=5000,
+        start_hour=9,  # Auto start
+        num_predictions=5000
     )
 
     print(f"\n🎉 Complete! Check your files:")
