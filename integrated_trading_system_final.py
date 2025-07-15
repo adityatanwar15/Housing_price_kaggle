@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 import os
 
 class IntegratedTradingSystem:
-    def __init__(self, training_window=50, start_hour=None, start_index=None, start_offset=None, num_predictions=10):
+    def __init__(self, training_window=5000, start_hour=9, start_index=None, start_offset=None, num_predictions=5000):
         """
         Initialize the Integrated Trading System
 
