@@ -61,8 +61,9 @@ class IntegratedTradingSystem:
         # Load and combine data
         all_data = []
         total_rows = 0
-
+        
         for  file_path in parquet_files:
+
             try:
                 print(f"  Loading {file_path}... ", end="")
                 df = pd.read_parquet(FILE_PATTERN+file_path)
@@ -304,7 +305,8 @@ class IntegratedTradingSystem:
 
             # Get training data
             train = self.candles.iloc[i-self.training_window:i].copy()
-            if self.candles.iloc[i]['candle_time'].hour()<=9:
+            #print(self.candles.iloc[i]['candle_time'])
+            if pd.to_datetime(self.candles.iloc[i]['candle_time']).hour<=9:
                 continue
 
             # --- CLASSIFICATION TARGET ---
