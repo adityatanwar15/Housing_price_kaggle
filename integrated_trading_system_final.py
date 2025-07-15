@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 import os
 
 class IntegratedTradingSystem:
-    def __init__(self, training_window=5000, start_hour=9, start_index=None, start_offset=None, num_predictions=5000):
+    def __init__(self, training_window=50, start_hour=None, start_index=None, start_offset=None, num_predictions=10):
         """
         Initialize the Integrated Trading System
 
@@ -304,6 +304,8 @@ class IntegratedTradingSystem:
 
             # Get training data
             train = self.candles.iloc[i-self.training_window:i].copy()
+            if self.candles.iloc[i]['candle_time'].hour()<=9:
+                continue
 
             # --- CLASSIFICATION TARGET ---
             y_ret = train['close'].pct_change().shift(-1)
@@ -456,7 +458,7 @@ class IntegratedTradingSystem:
         with pd.ExcelWriter(excel_file, engine='openpyxl') as writer:
             # Main results
             df['timestamp'] = df['timestamp'].astype(str)
-            candles['candle_time']=candles['candle_time'].astype('str')
+            self.candles['candle_time']=self.candles['candle_time'].astype('str')
             df.round(2).to_excel(writer, sheet_name='Predictions', index=False)
 
             # Performance summary
@@ -576,7 +578,7 @@ if __name__ == "__main__":
     system, excel, csv = run_trading_system(
         file_path=FILE_PATTERN,
         training_window=5000,
-        start_hour=9,  # Auto start
+        start_hour=None,  # Auto start
         num_predictions=5000
     )
 
