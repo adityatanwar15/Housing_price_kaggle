@@ -14,55 +14,6 @@ NUM_PREDICTIONS = 5
 TICK_THRESHOLD = 0.0005  # Reduced threshold for more sensitivity
 FEATURE_COLUMNS = []  # Populated later
 
-# STEP 1: Load and process uploaded parquet files
-def load_candles():
-    # Load all uploaded chunks
-    #chunk_files = ['chunk_0001.parquet', 'chunk_0002.parquet', 'chunk_0003.parquet', 'chunk_0004.parquet']
-    dfs = []
-    FILE_PATTERN=r"C:\Users\aditya-tanwar\OneDrive - MMC\Documents\my_work\study_work\data\\"
-
-    chunk_files = os.listdir(FILE_PATTERN)#['chunk_0001.parquet', 'chunk_0002.parquet', 'chunk_0003.parquet', 'chunk_0004.parquet']
-    
-    
-    for file in chunk_files[:4]:
-        try:
-            df = pd.read_parquet(FILE_PATTERN+file)
-            # Filter for Trade data and clean
-            df = df[df['Type'] == 'Trade'].dropna(subset=['Price', 'Volume'])
-            df['Date-Time'] = pd.to_datetime(df['Date-Time'])
-            df=df[['Date-Time', 'GMT Offset', 'Price', 'Volume', 'Bid Price', 'Ask Price']]
-            df['GMT Offset'] += 7
-            df['Date-Time'] = pd.to_datetime(df['Date-Time']) + pd.to_timedelta(df['GMT Offset'], unit='h')
-            df['candle_time'] = df['Date-Time'].dt.floor('15min')
-            dfs.append(df[['Date-Time', 'Price', 'Volume', 'candle_time']])
-            print(f"Loaded {len(df)} trades from {file}")
-        except Exception as e:
-            print(f"Error loading {file}: {e}")
-    
-    if not dfs:
-        raise ValueError("No data loaded successfully")
-    
-    # Combine all data
-    trades = pd.concat(dfs).sort_values('Date-Time')
-    print(f"Total trades loaded: {len(trades)}")
-    trades['Vol_price']=trades['Price']*trades['Volume']
-    # Create 15-minute candles
-    grouped = trades.groupby('candle_time').agg(
-        open=('Price', 'first'),
-        high=('Price', 'max'),
-        low=('Price', 'min'),
-        close=('Price', 'last'),
-        volume=('Volume', 'sum'),
-        num_ticks=('Price', 'count'),
-        total_turnover=('Vol_price', 'sum')
-    ).reset_index()
-    
-    grouped['vwap'] = grouped['total_turnover'] / grouped['volume']
-    grouped.dropna(inplace=True)
-    print(f"Created {len(grouped)} 15-minute candles")
-    
-    return grouped
-
 
 
 def rolling_slope(series, window):
@@ -118,7 +69,7 @@ def process_tick_data_to_candles():
     chunk_files = os.listdir(FILE_PATTERN)#['chunk_0001.parquet', 'chunk_0002.parquet', 'chunk_0003.parquet', 'chunk_0004.parquet']
     print(1)
     
-    for file in chunk_files[:3]:
+    for file in chunk_files:
         try:
             df_temp = pd.read_parquet(FILE_PATTERN+file)
             # Filter for Trade data and clean
@@ -154,16 +105,14 @@ def process_tick_data_to_candles():
     candles = candles.reset_index()
 
     # Volume bucket features
-    bucket_edges = [100, 200, 500, 1000, 2000, 5000, 5500, 6000, 7500, 9000, 10000]
-    bucket_names = [f'vol_{bucket_edges[i]}_{bucket_edges[i+1]-1}' for i in range(len(bucket_edges)-1)]
-    bucket_names.append(f'vol_{bucket_edges[-1]}_plus')
+    bucket_edges = [100, 200, 500, 1000, 2500, 5000,7500,10000,15000,50000]
+    bucket_names = [f'vol_{bucket_edges[i]}' for i in range(len(bucket_edges))]
+    tick_names = [f'tick_{bucket_edges[i]}' for i in range(len(bucket_edges))]
 
     for i in range(len(bucket_edges)):
-        lo = bucket_edges[i]
-        hi = bucket_edges[i+1] if i+1 < len(bucket_edges) else np.inf
-        candles[bucket_names[i]] = df.groupby(['day', 'candle_time']).apply(
-            lambda g: ((g['Volume'] >= lo) & (g['Volume'] < hi)).sum()
-        ).values
+        candles[bucket_names[i]] = candles['volume']/bucket_edges[i]
+        candles[tick_names[i]] = candles['num_ticks']/bucket_edges[i]
+        
     print(3)
 
     # Add small and large volume buckets for order flow
@@ -200,46 +149,38 @@ def add_all_features(candles):
     """Add all features to candle DataFrame"""
 
     short_window = 5#max(3, min(5, total_candles // 20))
-    med_window = 10#max(5, min(10, total_candles // 15))
-    long_window = 20#max(10, min(20, total_candles // 10))
+    med_window = 14#max(5, min(10, total_candles // 15))
+    long_window = 100#max(10, min(20, total_candles // 10))
 
     # Basic moving averages
     candles['sma_short'] = candles['close'].rolling(short_window, min_periods=1).mean()
     candles['sma_med'] = candles['close'].rolling(med_window, min_periods=1).mean()
 
-    # Original features
-    candles['kama_10'] = candles['close'].rolling(5, min_periods=1).mean()
-    candles['kama_30'] = candles['close'].rolling(10, min_periods=1).mean()
-    candles['kama_200'] = candles['close'].rolling(20, min_periods=1).mean()
+    candles['linear_slope_'+str(short_window)] = rolling_slope(candles['close'], short_window)
+    candles['linear_slope_'+str(med_window)] = rolling_slope(candles['close'], med_window)
+    candles['hurst_'+str(med_window)] = rolling_hurst(candles['close'], med_window)
 
-    candles['linear_slope_36'] = rolling_slope(candles['close'], 6)
-    candles['linear_slope_72'] = rolling_slope(candles['close'], 12)
-    candles['hurst_6'] = rolling_hurst(candles['close'], 6)
-
-    candles['vol_rogers_satchell_10'] = rogers_satchell_vol(
-        candles['high'], candles['low'], candles['close'], candles['open'], 10
+    candles['vol_rogers_satchell_'+str(short_window)] = rogers_satchell_vol(
+        candles['high'], candles['low'], candles['close'], candles['open'], short_window
     )
 
     # Quantile bins
-    q0 = candles['close'].rolling(20, min_periods=1).quantile(0.0)
-    q25 = candles['close'].rolling(20, min_periods=1).quantile(0.25)
-    q75 = candles['close'].rolling(20, min_periods=1).quantile(0.75)
-    q108 = candles['close'].rolling(20, min_periods=1).quantile(1.0)
+    q0 = candles['close'].rolling(long_window, min_periods=1).quantile(0.0)
+    q25 = candles['close'].rolling(long_window, min_periods=1).quantile(0.25)
+    q75 = candles['close'].rolling(long_window, min_periods=1).quantile(0.75)
+    q108 = candles['close'].rolling(long_window, min_periods=1).quantile(1.0)
     candles['bin_0_25'] = ((candles['close'] >= q0) & (candles['close'] < q25)).astype(int)
     candles['bin_25_75'] = ((candles['close'] >= q25) & (candles['close'] < q75)).astype(int)
     candles['bin_75_108'] = ((candles['close'] >= q75) & (candles['close'] <= q108)).astype(int)
 
-    candles['auto_corr_6'] = rolling_autocorr(candles['close'], 6)
+    #candles['auto_corr_6'] = rolling_autocorr(candles['close'], 6)
 
     # Relative transformations
-    candles['pct_kama'] = ((candles['kama_30'] - candles['kama_200']) / candles['kama_200']) / candles['vol_rogers_satchell_10']
-    candles['pct_linear_slope'] = (candles['linear_slope_36'] - candles['linear_slope_72']) / candles['vol_rogers_satchell_10']
+    candles['pct_linear_slope'] = (candles['linear_slope_'+str(short_window)] - candles['linear_slope_'+str(med_window)]) / candles['vol_rogers_satchell_'+str(short_window)]
 
     # VWAP features
-    candles['vwap_short'] = (candles['close'] * candles['volume']).rolling(short_window, min_periods=1).sum() / candles['volume'].rolling(short_window, min_periods=1).sum()
-    candles['vwap_med'] = (candles['close'] * candles['volume']).rolling(med_window, min_periods=1).sum() / candles['volume'].rolling(med_window, min_periods=1).sum()
-    candles['vwap_ratio_short'] = candles['close'] / candles['vwap_short']
-    candles['vwap_distance_short'] = (candles['close'] - candles['vwap_short']) / candles['vwap_short']
+    candles['vwap_ratio_short'] = candles['close'] / ((candles['vwap']+candles['vwap_1m_avg_15'])/2)
+    candles['vwap_distance_short'] = (candles['close'] - ((candles['vwap']+candles['vwap_1m_avg_15'])/2)) / ((candles['vwap']+candles['vwap_1m_avg_15'])/2)
 
     # Order flow features
     candles['imbalance'] = (candles['vol_1_5'] - candles['vol_101_plus']) / (candles['vol_1_5'] + candles['vol_101_plus'] + 1e-8)
@@ -251,18 +192,14 @@ def add_all_features(candles):
     candles['rsi_med'] = calculate_rsi(candles['close'], med_window)
 
     # Trend features
-    candles['trend_short'] = np.where(candles['close'] > candles['sma_short'], 1, -1)
-    candles['trend_med'] = np.where(candles['close'] > candles['sma_med'], 1, -1)
     candles['sma_cross'] = candles['sma_short'] - candles['sma_med']
 
 
     # VWAP features
-    candles['vwap_short'] = candles['vwap'].rolling(5).mean()
-    candles['vwap_med'] = candles['vwap'].rolling(15).mean()
-    candles['vwap_long'] = candles['vwap'].rolling(30).mean()
-    candles['price_vs_vwap'] = (candles['close'] - candles['vwap']) / candles['vwap']
-    candles['vwap_trend'] = candles['vwap'].pct_change(5)
-    
+    candles['vwap_short'] = candles['vwap'].rolling(short_window).mean()
+    candles['vwap_med'] = candles['vwap'].rolling(med_window).mean()
+    candles['vwap_long_short'] = candles['vwap_1m_avg_15'].rolling(short_window).mean()
+ 
     
     # Volume features
     candles['volume_sma'] = candles['volume'].rolling(20).mean()
@@ -282,11 +219,6 @@ def add_all_features(candles):
     candles['volume_price_trend'] = candles['volume'] * candles['close'].pct_change()
     
     # Rolling statistics
-    candles['price_zscore'] = (candles['close'] - candles['close'].rolling(20).mean()) / candles['close'].rolling(20).std()
-    candles['volume_zscore'] = (candles['volume'] - candles['volume'].rolling(20).mean()) / candles['volume'].rolling(20).std()
-    
-    # Trend strength
-    candles['trend_strength'] = abs(candles['close'].rolling(10).apply(lambda x: np.corrcoef(range(len(x)), x)[0,1]))
     
     # Enhanced tick-volume velocity
     candles['rolling_ticks'] = candles['num_ticks'].rolling(window=5, min_periods=1).sum()
@@ -305,81 +237,12 @@ def add_all_features(candles):
         candles[col] = candles[col].replace([np.inf, -np.inf], 0)
     
     print(f"Created {len(FEATURE_COLUMNS)} features for classification")
+    candles.to_csv('ESc1_featured_candles.csv')
 
 
     return candles
 
 
-
-
-
-
-
-
-# STEP 2: Enhanced feature engineering for classification
-def add_classification_features(c):
-    # Basic price features
-    candles['vwap'] = candles['vwap'].fillna(c['close'])
-    
-    # Multiple timeframe moving averages
-    for period in [5, 10, 15, 20, 30]:
-        c[f'sma_{period}'] = candles['close'].rolling(period).mean()
-        c[f'price_vs_sma_{period}'] = (c['close'] - c[f'sma_{period}']) / c[f'sma_{period}']
-    
-    # VWAP features
-    candles['vwap_short'] = c['vwap'].rolling(5).mean()
-    c['vwap_med'] = c['vwap'].rolling(15).mean()
-    c['vwap_long'] = c['vwap'].rolling(30).mean()
-    c['price_vs_vwap'] = (c['close'] - c['vwap']) / c['vwap']
-    c['vwap_trend'] = c['vwap'].pct_change(5)
-    
-    # Price momentum and volatility
-    for period in [3, 5, 10]:
-        c[f'momentum_{period}'] = c['close'].pct_change(period)
-        c[f'volatility_{period}'] = c['close'].rolling(period).std() / c['close'].rolling(period).mean()
-    
-    # Volume features
-    c['volume_sma'] = c['volume'].rolling(20).mean()
-    c['volume_ratio'] = c['volume'] / c['volume_sma']
-    c['volume_momentum'] = c['volume'].pct_change(5)
-    
-    # Tick intensity features
-    c['tick_intensity'] = c['num_ticks'] / c['num_ticks'].rolling(20).mean()
-    c['tick_momentum'] = c['num_ticks'].pct_change(3)
-    
-    # Price range features
-    c['high_low_ratio'] = (c['high'] - c['low']) / c['close']
-    c['close_position'] = (c['close'] - c['low']) / (c['high'] - c['low'])
-    
-    # Advanced features
-    c['price_acceleration'] = c['close'].pct_change().diff()
-    c['volume_price_trend'] = c['volume'] * c['close'].pct_change()
-    
-    # Rolling statistics
-    c['price_zscore'] = (c['close'] - c['close'].rolling(20).mean()) / c['close'].rolling(20).std()
-    c['volume_zscore'] = (c['volume'] - c['volume'].rolling(20).mean()) / c['volume'].rolling(20).std()
-    
-    # Trend strength
-    c['trend_strength'] = abs(c['close'].rolling(10).apply(lambda x: np.corrcoef(range(len(x)), x)[0,1]))
-    
-    # Enhanced tick-volume velocity
-    c['rolling_ticks'] = c['num_ticks'].rolling(window=5, min_periods=1).sum()
-    c['rolling_volume'] = c['volume'].rolling(window=5, min_periods=1).sum()
-    c['price_change_pct'] = c['close'].pct_change(periods=5)
-    c['tick_volume_velocity'] = (c['price_change_pct'] * c['rolling_ticks']) / (c['rolling_volume'] + 1e-8)
-    
-    # Define feature columns (excluding basic OHLCV)
-    global FEATURE_COLUMNS
-    FEATURE_COLUMNS = [col for col in c.columns if col not in ['candle_time', 'open', 'high', 'low', 'close', 'volume', 'num_ticks']]
-    
-    # Fill missing values
-    for col in FEATURE_COLUMNS:
-        c[col] = c[col].fillna(method='ffill').fillna(0)
-        # Replace infinite values
-        c[col] = c[col].replace([np.inf, -np.inf], 0)
-    
-    print(f"Created {len(FEATURE_COLUMNS)} features for classification")
-    return c
 
 # STEP 3: Enhanced classification with multiple models
 def run_classification_predictions(candles, window=ROLLING_WINDOW, num_preds=NUM_PREDICTIONS):
