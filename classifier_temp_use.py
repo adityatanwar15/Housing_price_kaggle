@@ -16,6 +16,80 @@ FEATURE_COLUMNS = []  # Populated later
 
 
 
+import pandas as pd
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.preprocessing import LabelEncoder
+import numpy as np
+from google.colab import files
+#uploaded = files.upload()
+# Load data
+candles = pd.read_csv('ESc1_featured_candles.csv')
+candles['candle_time'] = pd.to_datetime(candles['candle_time'])
+if 'Unnamed: 0' in candles.columns:
+    candles.drop(columns=['Unnamed: 0'], inplace=True)
+
+# Feature selection
+exclude_cols = ['day', 'candle_time', 'open', 'high', 'low', 'y_class']
+FEATURE_COLUMNS = [col for col in candles.columns if col not in exclude_cols]
+
+# Backtest function
+def run_backtest_rf(candles, FEATURE_COLUMNS, window=1000, num_preds=100, TICK_THRESHOLD=0.0007):
+    results = []
+    y_ret = candles['close'].pct_change().shift(-1)
+    candles['y_class'] = np.select(
+        [y_ret < -TICK_THRESHOLD, y_ret > TICK_THRESHOLD], 
+        [0, 2], 1
+    )
+
+    correct_predictions = 0
+    total_predictions = 0
+    le = LabelEncoder()
+
+    for i in range(window, window + num_preds):
+        train = candles.iloc[i - window:i].copy()
+        test = candles.iloc[i:i + 1]
+
+        X_train = train[FEATURE_COLUMNS].iloc[:-1]
+        y_train = train['y_class'].shift(-1).iloc[:-1].astype(int)
+        X_train = X_train.iloc[:len(y_train)]
+
+        if len(X_train) < 30 or y_train.nunique() < 2:
+            continue
+
+        y_train_enc = le.fit_transform(y_train)
+        model = RandomForestClassifier(
+            n_estimators=100,
+            max_depth=10,
+            class_weight='balanced',
+            random_state=42
+        )
+        model.fit(X_train, y_train_enc)
+
+        X_test = test[FEATURE_COLUMNS]
+        proba = model.predict_proba(X_test)[0]
+        pred_class = np.argmax(proba)
+        actual_class = int(test['y_class'].values[0])
+
+        if pred_class == actual_class:
+            correct_predictions += 1
+        total_predictions += 1
+
+        results.append({
+            'timestamp': test['candle_time'].values[0],
+            'pred_direction': pred_class - 1,
+            'actual_direction': actual_class - 1,
+            'prob_down': proba[0],
+            'prob_flat': proba[1],
+            'prob_up': proba[2],
+            'actual_close': test['close'].values[0],
+            'actual_volume': test['volume'].values[0]
+        })
+
+    accuracy = correct_predictions / total_predictions * 100 if total_predictions > 0 else 0
+    print(f"Final Accuracy: {accuracy:.2f}% over {total_predictions} predictions")
+    return pd.DataFrame(result)
+
+
 def rolling_slope(series, window):
     """Calculate rolling linear regression slope"""
     slopes = np.full(len(series), np.nan)
